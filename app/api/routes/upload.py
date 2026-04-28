@@ -4,6 +4,8 @@ import shutil
 
 from app.services.document_service import process_document
 from app.services.chunking_service import process_pages
+from app.services.embedding_service import EmbeddingService
+
 
 router = APIRouter()
 
@@ -53,9 +55,24 @@ async def upload_file(file: UploadFile = File(...)):
         token_limit=400,
         overlap=80
     )
+    
+    
+    # ---------------------------------------------------
+    # 5. Embedding step (NEW)
+    # ---------------------------------------------------
+    chunk_texts = [chunk["chunk_text"] for chunk in chunks]
+
+    embeddings = EmbeddingService.get_embeddings_batch(
+        chunk_texts,
+        batch_size=10
+)    
+    # Attach embeddings back to chunks
+    for i, chunk in enumerate(chunks):
+        chunk["embedding"] = embeddings[i]
+    print("Embedding length:", len(chunks[0]["embedding"]))    
 
     # ---------------------------------------------------
-    # 5. Response (preview only for now)
+    # 6. Response (preview only for now)
     # ---------------------------------------------------
     return {
         "filename": filename,
@@ -63,5 +80,11 @@ async def upload_file(file: UploadFile = File(...)):
         "pages_extracted": len(pages),
         "chunks_created": len(chunks),
         "preview_pages": pages[:1],
-        "preview_chunks": chunks[10:20]   # small preview
+        "preview_chunks": [
+    {
+        "chunk_text": c["chunk_text"],
+        "chunk_index": c["chunk_index"]
+    }
+    for c in chunks[10:20]
+]
     }
