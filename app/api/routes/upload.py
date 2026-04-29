@@ -5,7 +5,7 @@ import shutil
 from app.services.document_service import process_document
 from app.services.chunking_service import process_pages
 from app.services.embedding_service import EmbeddingService
-
+from app.services.db_service import DBService 
 
 router = APIRouter()
 
@@ -45,46 +45,77 @@ async def upload_file(file: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail="Failed to extract document text")
 
     # ---------------------------------------------------
-    # 4. Chunking step (NEW)
+    # 4. Insert document into DB ✅
     # ---------------------------------------------------
-    # document_id = None  # temporary (will come from DB later)
+    try:
+        document_id = DBService.insert_document(
+            filename=filename,
+            file_type=file_ext
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Document insert failed: {str(e)}")
 
+    # ---------------------------------------------------
+    # 5. Chunking step
+    # ---------------------------------------------------
     chunks = process_pages(
         pages=pages,
-        document_id=1 , # for testing
+        document_id=document_id, 
         token_limit=400,
         overlap=80
     )
-    
-    
+
+    if not chunks:
+        raise HTTPException(status_code=500, detail="Chunking failed")
+
     # ---------------------------------------------------
-    # 5. Embedding step (NEW)
+    # 6. Embedding step
     # ---------------------------------------------------
     chunk_texts = [chunk["chunk_text"] for chunk in chunks]
 
     embeddings = EmbeddingService.get_embeddings_batch(
         chunk_texts,
         batch_size=10
-)    
+    )
+
     # Attach embeddings back to chunks
     for i, chunk in enumerate(chunks):
-        chunk["embedding"] = embeddings[i]
-    print("Embedding length:", len(chunks[0]["embedding"]))    
+        embedding = embeddings[i]
+
+        # ✅ Safety check (avoid dimension issues)
+        if len(embedding) != 768:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Embedding dimension mismatch at chunk {i}"
+            )
+
+        chunk["embedding"] = embedding
+
+    print("Embedding length:", len(chunks[0]["embedding"]))
 
     # ---------------------------------------------------
-    # 6. Response (preview only for now)
+    # 7. Insert chunks into DB ✅
+    # ---------------------------------------------------
+    try:
+        DBService.insert_chunks(document_id, chunks)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Chunk insert failed: {str(e)}")
+
+    # ---------------------------------------------------
+    # 8. Response
     # ---------------------------------------------------
     return {
+        "message": "Document processed and stored successfully",
+        "document_id": document_id,
         "filename": filename,
         "file_type": file_ext,
         "pages_extracted": len(pages),
         "chunks_created": len(chunks),
-        "preview_pages": pages[:1],
         "preview_chunks": [
-    {
-        "chunk_text": c["chunk_text"],
-        "chunk_index": c["chunk_index"]
-    }
-    for c in chunks[10:20]
-]
+            {
+                "chunk_text": c["chunk_text"],
+                "chunk_index": c["chunk_index"]
+            }
+            for c in chunks[:5]
+        ]
     }
