@@ -10,4 +10,5 @@ class RetrievedChunk(BaseModel):
 
 class QueryResponse(BaseModel):
     query: str
-    results: List[RetrievedChunk]
+    answer: str
+    sources: List[RetrievedChunk]
