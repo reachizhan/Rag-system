@@ -1,4 +1,6 @@
 import requests
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import List, Optional
 
 OLLAMA_URL = "http://localhost:11434/api/embeddings"
 MODEL_NAME = "nomic-embed-text"
@@ -6,34 +8,62 @@ MODEL_NAME = "nomic-embed-text"
 
 class EmbeddingService:
 
+    # ---------------------------------------------------
+    # Single embedding
+    # ---------------------------------------------------
     @staticmethod
-    def get_embedding(text: str) -> list[float]:
+    def get_embedding(text: str) -> List[float]:
         response = requests.post(
             OLLAMA_URL,
             json={
                 "model": MODEL_NAME,
                 "prompt": text
-            }
+            },
+            timeout=60  # prevents hanging
         )
 
         if response.status_code != 200:
-            raise Exception(response.text)
+            raise Exception(f"Embedding API error: {response.text}")
 
-        return response.json()["embedding"]
+        data = response.json()
 
-    # 🚀 NEW: batch processor
+        if "embedding" not in data:
+            raise Exception("Invalid response: no embedding field")
+
+        return data["embedding"]
+
+    # ---------------------------------------------------
+    # Parallel embeddings (ORDER PRESERVED)
+    # ---------------------------------------------------
     @staticmethod
-    def get_embeddings_batch(texts: list[str], batch_size: int = 10) -> list[list[float]]:
-        all_embeddings = []
+    def get_embeddings_parallel(
+        texts: List[str],
+        max_workers: int = 5
+    ) -> List[List[float]]:
 
-        for i in range(0, len(texts), batch_size):
-            batch = texts[i:i + batch_size]
+        if not texts:
+            return []
 
-            batch_embeddings = [
-                EmbeddingService.get_embedding(text)
-                for text in batch
-            ]
+        # 🔧 Proper typing (fixes Pylance issue)
+        embeddings: List[Optional[List[float]]] = [None] * len(texts)
 
-            all_embeddings.extend(batch_embeddings)
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_index = {
+                executor.submit(EmbeddingService.get_embedding, text): idx
+                for idx, text in enumerate(texts)
+            }
 
-        return all_embeddings
+            for future in as_completed(future_to_index):
+                idx = future_to_index[future]
+
+                try:
+                    result = future.result()
+                    embeddings[idx] = result
+                except Exception as e:
+                    raise Exception(f"Embedding failed at index {idx}: {str(e)}")
+
+        # 🔒 Safety check (important)
+        if any(e is None for e in embeddings):
+            raise Exception("Some embeddings failed to generate")
+
+        return embeddings  # type: ignore

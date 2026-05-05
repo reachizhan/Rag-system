@@ -3,18 +3,26 @@ from app.services.embedding_service import EmbeddingService
 from app.db.connection import SessionLocal
 
 
-def retrieve_chunks(query: str, top_k: int = 5):
+def retrieve_chunks(query: str, top_k: int = 10):
     db = SessionLocal()
 
     try:
-        # ✅ Correct embedding call
+        # ---------------------------------------------------
+        # 1. Query embedding
+        # ---------------------------------------------------
         query_embedding = EmbeddingService.get_embedding(query)
 
-        # ✅ SQLAlchemy-safe query
+        # ---------------------------------------------------
+        # 2. Retrieve CHILD chunks (with parent_id)
+        # ---------------------------------------------------
         sql = text("""
-            SELECT chunk_text, embedding <-> CAST(:embedding AS vector) AS distance
+            SELECT 
+                id,
+                chunk_text,
+                parent_id,
+                embedding <=> CAST(:embedding AS vector) AS distance
             FROM chunks
-             ORDER BY embedding <-> CAST(:embedding AS vector)
+            ORDER BY distance
             LIMIT :limit
         """)
 
@@ -26,19 +34,61 @@ def retrieve_chunks(query: str, top_k: int = 5):
             }
         ).fetchall()
 
+        # ---------------------------------------------------
+        # 3. Collect parent IDs
+        # ---------------------------------------------------
+        parent_ids = list(set([row[2] for row in results if row[2] is not None]))
+
+        # ---------------------------------------------------
+        # 4. Fetch PARENT chunks
+        # ---------------------------------------------------
+        parent_sql = text("""
+            SELECT id, parent_text
+            FROM parent_chunks
+            WHERE id = ANY(:ids)
+        """)
+
+        parents = db.execute(
+            parent_sql,
+            {"ids": parent_ids}
+        ).fetchall()
+
+        parent_map = {p[0]: p[1] for p in parents}
+
+        # ---------------------------------------------------
+        # 5. Format response
+        # ---------------------------------------------------
         formatted = []
 
         for row in results:
-            chunk_text = row[0]
-            distance = row[1]
+            chunk_id = row[0]
+            chunk_text = row[1]
+            parent_id = row[2]
+            distance = float(row[3])
 
-            score = 1 / (1 + distance)
+            # 🔥 FILTER HERE
+            if distance < 0.5:
+                formatted.append({
+                    "chunk_id": chunk_id,
+                    "chunk_text": chunk_text,
+                    "parent_id": parent_id,
+                    "parent_text": parent_map.get(parent_id, ""),
+                    "distance": distance
+                })
+
+        if not formatted:
+            # fallback → return top 1 result anyway
+            row = results[0]
 
             formatted.append({
-                "chunk_text": chunk_text,
-                "score": score
+                "chunk_id": row[0],
+                "chunk_text": row[1],
+                "parent_id": row[2],
+                "parent_text": parent_map.get(row[2], ""),
+                "distance": float(row[3])
             })
-
+        
+        
         return formatted
 
     finally:

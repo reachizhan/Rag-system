@@ -1,15 +1,11 @@
 from typing import List, Dict
-from transformers import AutoTokenizer
 import re
-
-# ---------------------------------------------------
-# Tokenizer (global init)
-# ---------------------------------------------------
-tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
+import numpy as np
+from app.services.embedding_service import EmbeddingService
 
 
 # ---------------------------------------------------
-# 1. Section Header Detection (NEW)
+# 1. Section Header Detection (reuse yours)
 # ---------------------------------------------------
 def is_section_header(line: str) -> bool:
     line = line.strip()
@@ -17,15 +13,12 @@ def is_section_header(line: str) -> bool:
     if not line:
         return False
 
-    # 1. Numbered headings (e.g., 1.2.3 Heading)
     if re.match(r'^\d+(\.\d+)*\s+', line):
         return True
 
-    # 2. ALL CAPS headings
     if line.isupper() and len(line.split()) <= 10:
         return True
 
-    # 3. Title Case headings
     if line.istitle() and len(line.split()) <= 10:
         return True
 
@@ -33,197 +26,169 @@ def is_section_header(line: str) -> bool:
 
 
 # ---------------------------------------------------
-# 2. Split text into structured paragraphs
+# 2. Extract sentences WITH offsets + section
 # ---------------------------------------------------
-def split_into_paragraphs(text: str) -> List[str]:
+def extract_sentences_with_metadata(text: str) -> List[Dict]:
     lines = text.split("\n")
-    paragraphs = []
-    buffer = []
+
+    current_section = "Unknown"
+    sentences = []
+
+    cursor = 0  # track global position
 
     for line in lines:
+        raw_line = line
         line = line.strip()
 
         if not line:
-            if buffer:
-                paragraphs.append("\n".join(buffer))
-                buffer = []
+            cursor += len(raw_line) + 1
             continue
 
-        # 🔥 NEW: force split on headings
+        # Detect section
         if is_section_header(line):
-            if buffer:
-                paragraphs.append("\n".join(buffer))
-                buffer = []
-            paragraphs.append(line)
+            current_section = line
+            cursor += len(raw_line) + 1
             continue
 
-        buffer.append(line)
+        # Sentence splitting with offsets
+        for match in re.finditer(r'[^.!?]+[.!?]?', raw_line):
+            sent = match.group().strip()
+            if not sent:
+                continue
 
-    if buffer:
-        paragraphs.append("\n".join(buffer))
+            start = cursor + match.start()
+            end = cursor + match.end()
 
-    return paragraphs
+            sentences.append({
+                "text": sent,
+                "start": start,
+                "end": end,
+                "section": current_section
+            })
+
+        cursor += len(raw_line) + 1
+
+    return sentences
 
 
 # ---------------------------------------------------
-# 3. Token counter
+# 3. Cosine similarity
 # ---------------------------------------------------
-def count_tokens(text: str) -> int:
-    return len(tokenizer.encode(text, add_special_tokens=False))
+def cosine_sim(a, b):
+    a = np.array(a)
+    b = np.array(b)
+    return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
 
 
 # ---------------------------------------------------
-# 4. Split oversized paragraphs (sentence-based)
+# 4. Semantic chunking
 # ---------------------------------------------------
-def split_large_paragraph(text: str, token_limit: int) -> List[str]:
-    sentences = re.split(r'(?<=[.!?])\s+', text)
+def semantic_chunking(
+    sentences: List[Dict],
+    similarity_threshold: float = 0.55,
+    max_chunk_size: int = 10
+) -> List[List[Dict]]:
+
+    if not sentences:
+        return []
+
+    texts = [s["text"] for s in sentences]
+
+    # 🚀 USE PARALLEL EMBEDDINGS
+    embeddings = EmbeddingService.get_embeddings_parallel(
+        texts,
+        max_workers=5
+    )
 
     chunks = []
-    current = []
-    current_tokens = 0
+    current_chunk = [sentences[0]]
+    current_embeds = [embeddings[0]]
 
-    for sentence in sentences:
-        sentence_tokens = count_tokens(sentence)
+    for i in range(1, len(sentences)):
 
-        if current_tokens + sentence_tokens > token_limit:
-            if current:
-                chunks.append(" ".join(current))
-                current = []
-                current_tokens = 0
+        # 🔥 BETTER SIMILARITY (compare with LAST sentence)
+        sim = cosine_sim(current_embeds[-1], embeddings[i])
 
-        current.append(sentence)
-        current_tokens += sentence_tokens
+        # 🔥 IMPROVED SPLIT LOGIC
+        should_split = False
 
-    if current:
-        chunks.append(" ".join(current))
+        # 1. Semantic break
+        if sim < similarity_threshold:
+            should_split = True
 
-    return chunks
+        # 2. Size limit
+        elif len(current_chunk) >= max_chunk_size:
+            should_split = True
 
+        # 3. Section change (SOFT condition)
+        elif (
+            sentences[i]["section"] != current_chunk[-1]["section"]
+            and len(current_chunk) >= 3   # 👈 allow small variation
+        ):
+            should_split = True
 
-# ---------------------------------------------------
-# 5. Build chunks with overlap
-# ---------------------------------------------------
-def build_chunks(
-    paragraphs: List[str],
-    token_limit: int = 400,
-    overlap: int = 80
-) -> List[str]:
+        if should_split:
+            chunks.append(current_chunk)
+            current_chunk = []
+            current_embeds = []
 
-    chunks = []
-    current_chunk = []
-    current_tokens = 0
-
-    for para in paragraphs:
-        para_tokens = count_tokens(para)
-
-        # ---------------------------------------------------
-        # FIX 1: Oversized paragraph handling
-        # ---------------------------------------------------
-        if para_tokens > token_limit:
-            if current_chunk:
-                chunks.append("\n\n".join(current_chunk))
-                current_chunk = []
-                current_tokens = 0
-
-            sub_chunks = split_large_paragraph(para, token_limit)
-            chunks.extend(sub_chunks)
-            continue
-
-        # ---------------------------------------------------
-        # Normal chunk boundary check
-        # ---------------------------------------------------
-        if current_tokens + para_tokens > token_limit:
-            if current_chunk:
-                chunks.append("\n\n".join(current_chunk))
-
-                # overlap handling
-                overlap_paras = []
-                overlap_tokens = 0
-
-                for p in reversed(current_chunk):
-                    t = count_tokens(p)
-                    if overlap_tokens + t > overlap:
-                        break
-                    overlap_paras.insert(0, p)
-                    overlap_tokens += t
-
-                current_chunk = overlap_paras
-                current_tokens = overlap_tokens
-
-        current_chunk.append(para)
-        current_tokens += para_tokens
+        current_chunk.append(sentences[i])
+        current_embeds.append(embeddings[i])
 
     if current_chunk:
-        chunks.append("\n\n".join(current_chunk))
+        chunks.append(current_chunk)
 
     return chunks
 
 
 # ---------------------------------------------------
-# 6. Main pipeline (with cross-page support)
+# 5. Build final chunk objects
+# ---------------------------------------------------
+def build_chunks_from_semantic(chunks: List[List[Dict]]) -> List[Dict]:
+    final_chunks = []
+
+    for idx, chunk in enumerate(chunks):
+        text = " ".join([s["text"] for s in chunk])
+
+        final_chunks.append({
+            "chunk_text": text,
+            "char_start": chunk[0]["start"],
+            "char_end": chunk[-1]["end"],
+            "section": chunk[0]["section"],  # assume same section
+            "chunk_index": idx
+        })
+
+    return final_chunks
+
+
+# ---------------------------------------------------
+# 6. MAIN PIPELINE
 # ---------------------------------------------------
 def process_pages(
     pages: List[Dict],
-    document_id: int,
-    token_limit: int = 400,
-    overlap: int = 80,
-    cross_page_boundary: bool = True
+    document_id: int
 ) -> List[Dict]:
 
-    all_chunks = []
-    chunk_index = 0
+    all_sentences = []
 
-    # ---------------------------------------------------
-    # Cross-page chunking mode
-    # ---------------------------------------------------
-    if cross_page_boundary:
-        paragraphs = []
-
-        for page in pages:
-            text = page.get("text", "")
-            if not text.strip():
-                continue
-
-            page_paragraphs = split_into_paragraphs(text)
-            paragraphs.extend(page_paragraphs)
-
-        chunks = build_chunks(paragraphs, token_limit, overlap)
-
-        for chunk in chunks:
-            all_chunks.append({
-                "document_id": document_id,
-                "chunk_text": chunk,
-                "chunk_index": chunk_index,
-                "page_number": None,  # mixed pages
-                "char_start": None,
-                "char_end": None
-            })
-            chunk_index += 1
-
-        return all_chunks
-
-    # ---------------------------------------------------
-    # Page-by-page fallback
-    # ---------------------------------------------------
+    # 🔥 Merge all pages (cross-page semantic understanding)
     for page in pages:
-        page_number = page.get("page_number")
         text = page.get("text", "")
-
         if not text.strip():
             continue
 
-        paragraphs = split_into_paragraphs(text)
-        chunks = build_chunks(paragraphs, token_limit, overlap)
+        sentences = extract_sentences_with_metadata(text)
+        all_sentences.extend(sentences)
 
-        for chunk in chunks:
-            all_chunks.append({
-                "document_id": document_id,
-                "chunk_text": chunk,
-                "chunk_index": chunk_index,
-                "page_number": page_number,
-                "char_start": None,
-                "char_end": None
-            })
-            chunk_index += 1
+    # 🔥 Semantic chunking
+    semantic_chunks: List[List[Dict]] = semantic_chunking(all_sentences)
 
-    return all_chunks
+    # 🔥 Build final chunks
+    chunks = build_chunks_from_semantic(semantic_chunks)
+
+    # 🔥 Attach document metadata
+    for c in chunks:
+        c["document_id"] = document_id
+        c["page_number"] = None  # optional: improve later
+
+    return chunks
