@@ -1,12 +1,15 @@
 from pydantic import BaseModel
-from typing import List
+from typing import List, Optional
 
 class QueryRequest(BaseModel):
     query: str
 
+
 class RetrievedChunk(BaseModel):
-    chunk_text: str
-    score: float
+    parent_id: int
+    preview: str
+    distance: Optional[float] = None   # make optional if not always present
+
 
 class QueryResponse(BaseModel):
     query: str

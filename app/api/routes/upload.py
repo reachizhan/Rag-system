@@ -3,9 +3,8 @@ import os
 import shutil
 
 from app.services.document_service import process_document
-from app.services.chunking_service import process_pages
-from app.services.embedding_service import EmbeddingService
-from app.services.db_service import DBService 
+from app.services.db_service import DBService
+from app.services.ingestion_service import ingest_document
 
 router = APIRouter()
 
@@ -15,8 +14,9 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 @router.post("/")
 async def upload_file(file: UploadFile = File(...)):
+
     # ---------------------------------------------------
-    # 1. Validate file type
+    # 1. Validate file
     # ---------------------------------------------------
     filename = file.filename
 
@@ -37,7 +37,7 @@ async def upload_file(file: UploadFile = File(...)):
         shutil.copyfileobj(file.file, buffer)
 
     # ---------------------------------------------------
-    # 3. Extract text (page-wise)
+    # 3. Extract text
     # ---------------------------------------------------
     pages = process_document(file_path, file_ext)
 
@@ -45,7 +45,7 @@ async def upload_file(file: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail="Failed to extract document text")
 
     # ---------------------------------------------------
-    # 4. Insert document into DB ✅
+    # 4. Store document metadata
     # ---------------------------------------------------
     try:
         document_id = DBService.insert_document(
@@ -53,69 +53,32 @@ async def upload_file(file: UploadFile = File(...)):
             file_type=file_ext
         )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Document insert failed: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Document insert failed: {str(e)}"
+        )
 
     # ---------------------------------------------------
-    # 5. Chunking step
-    # ---------------------------------------------------
-    chunks = process_pages(
-        pages=pages,
-        document_id=document_id, 
-        token_limit=400,
-        overlap=80
-    )
-
-    if not chunks:
-        raise HTTPException(status_code=500, detail="Chunking failed")
-
-    # ---------------------------------------------------
-    # 6. Embedding step
-    # ---------------------------------------------------
-    chunk_texts = [chunk["chunk_text"] for chunk in chunks]
-
-    embeddings = EmbeddingService.get_embeddings_batch(
-        chunk_texts,
-        batch_size=10
-    )
-
-    # Attach embeddings back to chunks
-    for i, chunk in enumerate(chunks):
-        embedding = embeddings[i]
-
-        # ✅ Safety check (avoid dimension issues)
-        if len(embedding) != 768:
-            raise HTTPException(
-                status_code=500,
-                detail=f"Embedding dimension mismatch at chunk {i}"
-            )
-
-        chunk["embedding"] = embedding
-
-    print("Embedding length:", len(chunks[0]["embedding"]))
-
-    # ---------------------------------------------------
-    # 7. Insert chunks into DB ✅
+    # 5. FULL INGESTION PIPELINE (NEW CORE SYSTEM)
     # ---------------------------------------------------
     try:
-        DBService.insert_chunks(document_id, chunks)
+        ingest_document(
+            pages=pages,
+            document_id=document_id
+        )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Chunk insert failed: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Ingestion failed: {str(e)}"
+        )
 
     # ---------------------------------------------------
-    # 8. Response
+    # 6. Response
     # ---------------------------------------------------
     return {
-        "message": "Document processed and stored successfully",
+        "message": "Document processed successfully",
         "document_id": document_id,
         "filename": filename,
         "file_type": file_ext,
-        "pages_extracted": len(pages),
-        "chunks_created": len(chunks),
-        "preview_chunks": [
-            {
-                "chunk_text": c["chunk_text"],
-                "chunk_index": c["chunk_index"]
-            }
-            for c in chunks[:5]
-        ]
+        "pages_extracted": len(pages)
     }

@@ -16,16 +16,50 @@ class Document(Base):
     file_type = Column(String, nullable=False)
     created_at = Column(TIMESTAMP, server_default=func.now())
 
-    # delete chunks if document is deleted
+    # relationships
     chunks = relationship(
         "Chunk",
         back_populates="document",
         cascade="all, delete"
     )
 
+    parent_chunks = relationship(
+        "ParentChunk",
+        back_populates="document",
+        cascade="all, delete"
+    )
+
 
 # -------------------------
-# Chunks Table
+# Parent Chunks Table (NEW)
+# -------------------------
+class ParentChunk(Base):
+    __tablename__ = "parent_chunks"
+
+    id = Column(Integer, primary_key=True, index=True)
+
+    document_id = Column(
+        Integer,
+        ForeignKey("documents.id", ondelete="CASCADE"),
+        nullable=False
+    )
+
+    parent_text = Column(Text, nullable=False)
+
+    created_at = Column(TIMESTAMP, server_default=func.now())
+
+    # relationships
+    document = relationship("Document", back_populates="parent_chunks")
+
+    children = relationship(
+        "Chunk",
+        back_populates="parent",
+        cascade="all, delete"
+    )
+
+
+# -------------------------
+# Chunks Table (CHILD CHUNKS)
 # -------------------------
 class Chunk(Base):
     __tablename__ = "chunks"
@@ -34,23 +68,33 @@ class Chunk(Base):
 
     document_id = Column(
         Integer,
-        ForeignKey("documents.id", ondelete="CASCADE")
+        ForeignKey("documents.id", ondelete="CASCADE"),
+        nullable=False
+    )
+
+    # 🔥 NEW: link to parent chunk
+    parent_id = Column(
+        Integer,
+        ForeignKey("parent_chunks.id", ondelete="CASCADE"),
+        nullable=True
     )
 
     chunk_text = Column(Text, nullable=False)
 
-    # embedding (fixed dimension)
+    # embedding (child-level embedding for retrieval)
     embedding = Column(Vector(768))
 
     # ordering
     chunk_index = Column(Integer)
 
-    # ✅ NEW: structured metadata fields
+    # metadata
     page_number = Column(Integer)
     char_start = Column(Integer)
     char_end = Column(Integer)
 
-    created_at = Column(TIMESTAMP, default=datetime.utcnow)
+    created_at = Column(TIMESTAMP, server_default=func.now())
 
-    # relationship
+    # relationships
     document = relationship("Document", back_populates="chunks")
+
+    parent = relationship("ParentChunk", back_populates="children")
