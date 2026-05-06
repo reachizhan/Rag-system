@@ -1,17 +1,18 @@
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import List
+
 
 class QueryRequest(BaseModel):
     query: str
 
 
-class RetrievedChunk(BaseModel):
+class Source(BaseModel):
     parent_id: int
+    parent_text: str
     preview: str
-    distance: Optional[float] = None   # make optional if not always present
 
 
 class QueryResponse(BaseModel):
     query: str
     answer: str
-    sources: List[RetrievedChunk]
+    sources: List[Source]

@@ -34,19 +34,28 @@ async def query_docs(request: QueryRequest):
     # ---------------------------------------------------
     # 5. Build CLEAN sources (parent-level)
     # ---------------------------------------------------
-    unique_parents = {}
+    seen = set()
+    sources = []
 
     for r in results:
         pid = r["parent_id"]
 
-        if pid not in unique_parents and r["parent_text"]:
-            unique_parents[pid] = {
-                "parent_id": pid,
-                "preview": r["parent_text"][:300],
-                "distance": r["distance"]   # 👈 ADD THIS
-            }
+        if pid in seen:
+            continue
 
-    sources = list(unique_parents.values())[:3]
+        if not r["parent_text"]:
+            continue
+
+        seen.add(pid)
+
+        sources.append({
+            "parent_id": pid,
+            "parent_text": r["parent_text"],       # 🔥 FULL CONTEXT
+            "preview": r["parent_text"][:300]      # 🔥 SHORT PREVIEW
+        })
+
+        if len(sources) >= 3:
+            break
 
     # ---------------------------------------------------
     # 6. Final response
